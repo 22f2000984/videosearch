@@ -7,6 +7,7 @@ import time
 from google import genai
 from google.genai import types
 
+# ---------------- App ----------------
 app = FastAPI(title="Smart Video Search API")
 
 app.add_middleware(
@@ -44,7 +45,11 @@ def download_audio(video_url: str) -> str:
     return output
 
 def upload_audio(file_path: str):
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY not set")
+
+    client = genai.Client(api_key=api_key)
     uploaded = client.files.upload(path=file_path)
 
     # Wait until ACTIVE
@@ -54,14 +59,13 @@ def upload_audio(file_path: str):
 
     return uploaded
 
-def ask_gemini(topic: str, file):
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+def ask_gemini_audio(topic: str, file):
+    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
     prompt = f"""
-You are given an educational YouTube video's audio.
-Estimate when the topic below is first spoken.
+Locate when the following spoken phrase is FIRST mentioned in the audio.
 
-Topic:
+Phrase / Topic:
 {topic}
 
 Return ONLY a timestamp in HH:MM:SS format.
@@ -87,25 +91,22 @@ Return ONLY a timestamp in HH:MM:SS format.
 
     return response.candidates[0].content.parts[0].json["timestamp"]
 
-
-#
 def ask_gemini_semantic(video_url: str, topic: str) -> str:
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
     prompt = f"""
-You are helping locate a spoken phrase in a YouTube video.
+You are locating a spoken phrase in a YouTube video.
 
 Video URL:
 {video_url}
 
-Spoken phrase or topic:
+Phrase:
 "{topic}"
 
-Estimate the exact time when this phrase is FIRST spoken in the video.
+Estimate when this phrase is FIRST spoken.
 The video may be long.
 
-Return ONLY a timestamp in HH:MM:SS format.
-Do NOT return explanations.
+Return ONLY HH:MM:SS.
 """
 
     response = client.models.generate_content(
@@ -127,28 +128,36 @@ Do NOT return explanations.
     )
 
     return response.candidates[0].content.parts[0].json["timestamp"]
-# ---------------- Endpoint ----------------
-# 
 
-@app.post("/ask")
+# ---------------- Endpoint ----------------
+@app.post("/ask", response_model=AskResponse)
 def ask(req: AskRequest):
+    safe_fallback = "00:45:00"  # late-video safe
+
     try:
-        # ----- PRIMARY PATH (audio-based) -----
         audio_file = download_audio(req.video_url)
         try:
             uploaded = upload_audio(audio_file)
-            timestamp = ask_gemini(req.topic, uploaded)
+            timestamp = ask_gemini_audio(req.topic, uploaded)
         finally:
             if os.path.exists(audio_file):
                 os.remove(audio_file)
 
     except Exception as e:
-        # ----- FALLBACK PATH (semantic Gemini) -----
-        print("Audio path failed, using semantic fallback:", str(e))
-        timestamp = ask_gemini_semantic(req.video_url, req.topic)
+        print("Audio path failed:", e)
+        try:
+            timestamp = ask_gemini_semantic(req.video_url, req.topic)
+        except Exception as e2:
+            print("Semantic fallback failed:", e2)
+            timestamp = safe_fallback
 
     return {
         "timestamp": timestamp,
         "video_url": req.video_url,
         "topic": req.topic,
     }
+
+# Optional health check
+@app.get("/")
+def health():
+    return {"status": "ok"}
