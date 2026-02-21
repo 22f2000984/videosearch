@@ -87,17 +87,54 @@ Return ONLY a timestamp in HH:MM:SS format.
 
     return response.candidates[0].content.parts[0].json["timestamp"]
 
+
+#
+def ask_gemini_semantic(video_url: str, topic: str) -> str:
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
+    prompt = f"""
+You are helping locate a spoken phrase in a YouTube video.
+
+Video URL:
+{video_url}
+
+Spoken phrase or topic:
+"{topic}"
+
+Estimate the exact time when this phrase is FIRST spoken in the video.
+The video may be long.
+
+Return ONLY a timestamp in HH:MM:SS format.
+Do NOT return explanations.
+"""
+
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "timestamp": types.Schema(
+                        type=types.Type.STRING,
+                        pattern="^[0-9]{2}:[0-9]{2}:[0-9]{2}$",
+                    )
+                },
+                required=["timestamp"],
+            ),
+        ),
+    )
+
+    return response.candidates[0].content.parts[0].json["timestamp"]
 # ---------------- Endpoint ----------------
 # 
 
 @app.post("/ask")
 def ask(req: AskRequest):
-    # SAFE DEFAULT (fallback)
-    fallback_timestamp = "00:05:00"
-
     try:
+        # ----- PRIMARY PATH (audio-based) -----
         audio_file = download_audio(req.video_url)
-
         try:
             uploaded = upload_audio(audio_file)
             timestamp = ask_gemini(req.topic, uploaded)
@@ -105,14 +142,10 @@ def ask(req: AskRequest):
             if os.path.exists(audio_file):
                 os.remove(audio_file)
 
-        # Final sanity check
-        if not isinstance(timestamp, str) or len(timestamp) != 8:
-            timestamp = fallback_timestamp
-
     except Exception as e:
-        # NEVER FAIL THE GRADER
-        print("FALLBACK USED:", str(e))
-        timestamp = fallback_timestamp
+        # ----- FALLBACK PATH (semantic Gemini) -----
+        print("Audio path failed, using semantic fallback:", str(e))
+        timestamp = ask_gemini_semantic(req.video_url, req.topic)
 
     return {
         "timestamp": timestamp,
